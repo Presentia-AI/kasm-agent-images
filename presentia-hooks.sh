@@ -45,9 +45,12 @@ __presentia_fix_chrome_desktop_icon() {
 }
 
 # Clone / refresh the agent-workspace tooling repo and wire role-scoped files
-# into ~/agent. Generates a per-workspace SSH deploy key on first run; if the
-# key isn't registered on the repo yet, writes DEPLOY_KEY_TO_REGISTER.md with
-# instructions and exits non-zero so the banner surfaces it.
+# into ~/agent. Auths via the presentia-agent-tooling GitHub App: the host
+# mints an installation token via cron and bind-mounts it at
+# /etc/presentia/github-token; the credential helper at
+# /usr/local/bin/presentia-gh-token (wired into /etc/gitconfig at image build)
+# feeds the token to git over HTTPS. The App private key never enters the
+# container.
 #
 # Sets:
 #   ~/agent/tooling/                — clone of Presentia-AI/agent-workspace
@@ -59,54 +62,51 @@ __presentia_ensure_tooling() {
   local role="${KASM_ROLE_LABEL:-general-purpose}"
   local agent_dir="$HOME/agent"
   local tooling="$agent_dir/tooling"
-  local repo="git@github.com:Presentia-AI/agent-workspace.git"
-  local key="$HOME/.ssh/id_ed25519"
-  local notice="$agent_dir/DEPLOY_KEY_TO_REGISTER.md"
+  local repo="https://github.com/Presentia-AI/agent-workspace.git"
+  local token_file="/etc/presentia/github-token"
+  local notice="$agent_dir/GITHUB_APP_TOKEN_MISSING.md"
 
-  mkdir -p "$agent_dir" "$HOME/.ssh"
-  chmod 700 "$HOME/.ssh"
+  mkdir -p "$agent_dir"
 
-  # known_hosts: pin github.com on first run so the clone doesn't hang on
-  # interactive prompt or fail strict-host-key-checking.
-  if [ ! -f "$HOME/.ssh/known_hosts" ] || ! ssh-keygen -F github.com -f "$HOME/.ssh/known_hosts" >/dev/null 2>&1; then
-    ssh-keyscan -t ed25519 github.com 2>/dev/null >> "$HOME/.ssh/known_hosts"
-    chmod 600 "$HOME/.ssh/known_hosts"
+  # The Kasm host bind-mounts the installation token here. If it's missing,
+  # the workspace was launched without the mount — surface it loudly instead
+  # of silently failing the clone.
+  if [ ! -r "$token_file" ]; then
+    cat > "$notice" <<EOF
+# GitHub App token not mounted
+
+The agent tooling repo clone can't proceed because the installation token
+isn't bind-mounted into this container.
+
+Expected file: \`$token_file\` (mode 600, owned by uid 1000)
+Host source:   \`/var/lib/kasm-secrets/github-token\` on kasm-01
+Host minter:   \`/usr/local/bin/presentia-mint-token\` (cron every 50 min)
+
+Fix: on kasm-01, confirm the Kasm workspace docker_run_config bind-mounts
+\`/var/lib/kasm-secrets/github-token:/etc/presentia/github-token:ro\`, then
+relaunch this session.
+EOF
+    return 1
   fi
+  rm -f "$notice"
 
-  # Generate a per-workspace deploy key once. Stored in the persistent profile.
-  if [ ! -f "$key" ]; then
-    ssh-keygen -t ed25519 -N "" -C "kasm-${role}-$(hostname)" -f "$key" >/dev/null 2>&1
-    chmod 600 "$key"
-    chmod 644 "${key}.pub"
-  fi
-
-  # Clone (or pull) the tooling repo.
+  # Clone (or pull) the tooling repo. The credential helper baked into
+  # /etc/gitconfig supplies x-access-token + the installation token.
   if [ ! -d "$tooling/.git" ]; then
-    if ! GIT_SSH_COMMAND="ssh -o StrictHostKeyChecking=accept-new -o BatchMode=yes" \
-         git clone --quiet "$repo" "$tooling" 2>/dev/null; then
+    if ! git clone --quiet "$repo" "$tooling" 2>/dev/null; then
       cat > "$notice" <<EOF
-# Register this workspace's deploy key
+# Tooling clone failed
 
-The agent tooling repo (\`Presentia-AI/agent-workspace\`) clone failed because
-this workspace's SSH key isn't registered as a deploy key yet.
-
-## Public key
-\`\`\`
-$(cat "${key}.pub")
-\`\`\`
-
-## Steps
-1. Visit: https://github.com/Presentia-AI/agent-workspace/settings/keys/new
-2. Title: \`kasm-${role}-$(hostname)\`
-3. Tick "Allow write access" (agent pushes skills/memory updates back)
-4. Paste the public key above and save
-5. Open a fresh terminal in this workspace — the clone will retry automatically
+GitHub App token is mounted at \`$token_file\` but \`git clone $repo\`
+still failed. Likely causes:
+  - Token expired (host cron hasn't run recently — check /var/log/presentia-mint-token.log on kasm-01)
+  - App installation removed or repo removed from installation scope
+  - Network egress blocked
 EOF
       return 1
     fi
-    rm -f "$notice"
   else
-    (cd "$tooling" && GIT_SSH_COMMAND="ssh -o BatchMode=yes" git pull --rebase --quiet 2>/dev/null) || true
+    (cd "$tooling" && git pull --rebase --quiet 2>/dev/null) || true
   fi
 
   # Symlink role-scoped files into ~/agent/ so existing tooling that reads
@@ -137,7 +137,7 @@ if [ -n "$PS1" ] && [ -z "$TMUX" ] && [ -z "$AGENT_BANNER_SHOWN" ]; then
   if __presentia_ensure_tooling; then
     echo "Presentia Agent ready [role=${KASM_ROLE_LABEL:-general-purpose}]. Tooling synced. Auto-attaching tmux session [main]..."
   else
-    echo "Presentia Agent: tooling clone failed — register the deploy key (see ~/agent/DEPLOY_KEY_TO_REGISTER.md), then open a new terminal."
+    echo "Presentia Agent: tooling clone failed — see ~/agent/GITHUB_APP_TOKEN_MISSING.md, then open a new terminal."
   fi
   cd ~/agent 2>/dev/null || true
   if command -v tmux >/dev/null; then

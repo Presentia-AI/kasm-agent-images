@@ -2,10 +2,11 @@ FROM kasmweb/ubuntu-jammy-desktop:1.17.0
 
 USER root
 
-# Node 20 + git, tmux for session resilience, sudo for in-workspace package mgmt,
-# openssh-client for the tooling-repo deploy-key clone.
+# Node 20 + git, tmux for session resilience, sudo for in-workspace package mgmt.
+# Auth to the tooling repo is via the presentia-agent-tooling GitHub App (HTTPS
+# + bind-mounted installation token), so no openssh-client / ssh-key plumbing.
 RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
- && apt-get install -y --no-install-recommends nodejs git jq tmux sudo openssh-client \
+ && apt-get install -y --no-install-recommends nodejs git jq tmux sudo \
  && rm -rf /var/lib/apt/lists/* \
  && npm install -g @anthropic-ai/claude-code chrome-devtools-mcp
 
@@ -40,6 +41,17 @@ RUN mkdir -p /home/kasm-user/agent \
 # Wired up via presentia-hooks.sh as a Claude Code Notification hook.
 COPY agent-ping /usr/local/bin/agent-ping
 RUN chmod +x /usr/local/bin/agent-ping
+
+# presentia-gh-token: git credential helper that reads the bind-mounted
+# GitHub App installation token (refreshed by the host cron) and emits
+# git's credential protocol. The /etc/gitconfig stanza below scopes it to
+# the agent-workspace repo so it can never leak to unrelated clones.
+COPY presentia-gh-token /usr/local/bin/presentia-gh-token
+RUN chmod +x /usr/local/bin/presentia-gh-token \
+ && printf '%s\n' \
+    '[credential "https://github.com/Presentia-AI/agent-workspace"]' \
+    '    helper = /usr/local/bin/presentia-gh-token' \
+    >> /etc/gitconfig
 
 # Custom desktop launcher (kept from v0)
 COPY --chown=1000:1000 claude-agent.desktop /home/kasm-user/Desktop/claude-agent.desktop

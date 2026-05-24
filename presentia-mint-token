@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+# Mints a 1-hour installation token for the presentia-agent-tooling GitHub
+# App and writes it to /var/lib/kasm-secrets/github-token, owned by uid 1000
+# (kasm-user inside containers). Bind-mount that file into agent containers
+# at /etc/presentia/github-token; the in-container credential helper reads it.
+#
+# Runs on the Kasm host via cron every ~50 minutes (token TTL is 60 min).
+# The App private key (/etc/presentia/github-app.pem) NEVER enters containers.
+set -euo pipefail
+
+APP_ID=3845322
+INSTALL_ID=135293445
+PEM=/etc/presentia/github-app.pem
+OUT=/var/lib/kasm-secrets/github-token
+
+mkdir -p "$(dirname "$OUT")"
+chmod 700 "$(dirname "$OUT")"
+
+b64url() { openssl base64 -A | tr '+/' '-_' | tr -d '='; }
+
+header_b64=$(printf '%s' '{"alg":"RS256","typ":"JWT"}' | b64url)
+now=$(date +%s)
+payload_b64=$(printf '{"iat":%d,"exp":%d,"iss":"%d"}' "$((now - 60))" "$((now + 540))" "$APP_ID" | b64url)
+signing_input="${header_b64}.${payload_b64}"
+sig_b64=$(printf '%s' "$signing_input" | openssl dgst -sha256 -sign "$PEM" -binary | b64url)
+jwt="${signing_input}.${sig_b64}"
+
+resp=$(curl -fsSL -X POST \
+  -H "Authorization: Bearer $jwt" \
+  -H "Accept: application/vnd.github+json" \
+  -H "X-GitHub-Api-Version: 2022-11-28" \
+  "https://api.github.com/app/installations/${INSTALL_ID}/access_tokens")
+
+token=$(printf '%s' "$resp" | jq -r '.token // empty')
+if [ -z "$token" ]; then
+  printf 'presentia-mint-token: GitHub API returned no token\n%s\n' "$resp" >&2
+  exit 1
+fi
+
+tmp=$(mktemp)
+printf '%s\n' "$token" > "$tmp"
+chmod 600 "$tmp"
+chown 1000:1000 "$tmp"
+mv "$tmp" "$OUT"

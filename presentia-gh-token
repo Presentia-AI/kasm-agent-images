@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# Git credential helper for github.com/Presentia-AI/agent-workspace.
+#
+# Reads the installation token bind-mounted by the Kasm host at
+# /etc/presentia/github-token (refreshed every 50 min by the host-side
+# presentia-mint-token cron). The GitHub App private key NEVER enters the
+# container — only the short-lived (1h) installation token does.
+#
+# Wired up via /etc/gitconfig:
+#   [credential "https://github.com/Presentia-AI/agent-workspace"]
+#       helper = /usr/local/bin/presentia-gh-token
+TOKEN_FILE="${PRESENTIA_GH_TOKEN_FILE:-/etc/presentia/github-token}"
+
+case "${1:-}" in
+  get)
+    if [ -r "$TOKEN_FILE" ]; then
+      printf 'username=x-access-token\npassword=%s\n' "$(head -n1 "$TOKEN_FILE")"
+    fi
+    ;;
+  store|erase)
+    ;;
+esac
