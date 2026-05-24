@@ -1,0 +1,98 @@
+#!/usr/bin/env bash
+# Sync the Presentia agent image from GHCR into the local Docker daemon and
+# update the Kasm Postgres `images.hash` row to match the new digest.
+#
+# Pulls ghcr.io/presentia-ai/kasm-agent:latest, retags it locally with the
+# name registered in Kasm (so the agent's docker_images[*].tags list contains
+# the name Kasm matches against), and UPDATEs the hash on every images.name
+# row that points at the local tag. Idempotent — exits 0 with "no change" if
+# the digest already matches.
+#
+# Install:
+#   scp kasm-sync-agent-image root@kasm-01:/usr/local/bin/
+#   chmod +x /usr/local/bin/kasm-sync-agent-image
+#   echo '*/15 * * * * root /usr/local/bin/kasm-sync-agent-image' > /etc/cron.d/kasm-sync-agent
+#
+# Optional /root/.ghcr-token (mode 600) for private packages — docker login on
+# every run is cheap.
+
+set -euo pipefail
+
+GHCR_REF="ghcr.io/presentia-ai/kasm-agent:latest"
+LOCAL_TAG="presentia-agent-general:v0.3"  # MUST equal images.name in Kasm DB
+CREDS_FILE="/root/.kasm-credentials"
+GHCR_TOKEN_FILE="/root/.ghcr-token"
+LOG="/var/log/kasm-sync-agent-image.log"
+
+mkdir -p "$(dirname "$LOG")"
+exec >>"$LOG" 2>&1
+echo "=== $(date -u +%FT%TZ) sync invoked (pid $$) ==="
+
+if [ ! -f "$CREDS_FILE" ]; then
+  echo "ERROR: $CREDS_FILE not found"
+  exit 1
+fi
+# shellcheck disable=SC1090
+. "$CREDS_FILE"
+: "${DB_USER:?DB_USER not set in $CREDS_FILE}"
+: "${DB_PASS:?DB_PASS not set in $CREDS_FILE}"
+
+# Optional GHCR login (skipped if package is public)
+if [ -f "$GHCR_TOKEN_FILE" ]; then
+  GHCR_USER="${GHCR_USER:-presentia-ai}"
+  echo "logging in to GHCR as $GHCR_USER"
+  docker login ghcr.io -u "$GHCR_USER" --password-stdin < "$GHCR_TOKEN_FILE" >/dev/null
+fi
+
+# Pull from GHCR
+echo "pulling $GHCR_REF"
+if ! docker pull "$GHCR_REF" >/dev/null 2>pull.err; then
+  echo "ERROR: pull failed:"
+  cat pull.err; rm -f pull.err
+  exit 1
+fi
+rm -f pull.err
+
+# Local retag so images.name match works (Kasm matches agent's docker_images[*].tags)
+docker tag "$GHCR_REF" "$LOCAL_TAG"
+
+# Get the new digest from the local copy
+NEW_DIGEST=$(docker inspect "$GHCR_REF" --format='{{range .RepoDigests}}{{println .}}{{end}}' \
+  | grep "^ghcr.io/presentia-ai/kasm-agent@" | head -1 | awk -F@ '{print $2}')
+if [ -z "$NEW_DIGEST" ]; then
+  echo "ERROR: could not resolve digest for $GHCR_REF"
+  exit 1
+fi
+echo "GHCR digest: $NEW_DIGEST"
+
+# Read current row(s) — there may be N image_id rows sharing the same name
+# (we use one row per role with distinct persistent_profile_path).
+CURRENT=$(docker exec -e PGPASSWORD="$DB_PASS" kasm_db \
+  psql -U "$DB_USER" -d kasm -tA \
+  -c "SELECT hash FROM images WHERE name='${LOCAL_TAG}';")
+echo "current row hashes:"
+printf '  %s\n' $CURRENT
+
+if [ -z "$CURRENT" ]; then
+  echo "ERROR: no images row with name='$LOCAL_TAG' — nothing to update"
+  exit 1
+fi
+
+# If every row already at NEW_DIGEST, we're done
+NEED_UPDATE=0
+while IFS= read -r h; do
+  [ -z "$h" ] && continue
+  if [ "$h" != "$NEW_DIGEST" ]; then NEED_UPDATE=1; fi
+done <<< "$CURRENT"
+
+if [ "$NEED_UPDATE" = 0 ]; then
+  echo "no change — all rows already at $NEW_DIGEST"
+  exit 0
+fi
+
+# Update all rows for this name to the new digest
+docker exec -e PGPASSWORD="$DB_PASS" kasm_db \
+  psql -U "$DB_USER" -d kasm -c \
+  "UPDATE images SET hash='${NEW_DIGEST}' WHERE name='${LOCAL_TAG}';"
+echo "updated images.hash for name='${LOCAL_TAG}' → ${NEW_DIGEST}"
+echo "NOTE: existing Kasm sessions need destroy+recreate to pick up the new image."
