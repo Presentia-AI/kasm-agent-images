@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# tg-send — send a message to Jorge's approval channel via Telegram bot.
+# Token + chat ID loaded from ~/.config/agent/telegram.env (provisioned per-agent).
+set -euo pipefail
+
+ENV_FILE="${HOME}/.config/agent/telegram.env"
+if [[ ! -f "$ENV_FILE" ]]; then
+  echo "tg-send: $ENV_FILE not found — Telegram not yet provisioned for this agent." >&2
+  exit 2
+fi
+
+# shellcheck disable=SC1090
+source "$ENV_FILE"
+
+if [[ -z "${TELEGRAM_BOT_TOKEN:-}" || -z "${JORGE_CHAT_ID:-}" ]]; then
+  echo "tg-send: TELEGRAM_BOT_TOKEN or JORGE_CHAT_ID missing in $ENV_FILE." >&2
+  exit 2
+fi
+
+MSG="${1:?Usage: tg-send \"<message>\"}"
+
+curl -sS -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+  --data-urlencode "chat_id=${JORGE_CHAT_ID}" \
+  --data-urlencode "text=${MSG}" \
+  --data-urlencode "parse_mode=Markdown" \
+  | jq -r '. | if .ok then "sent" else "ERROR: \(.description)" end'

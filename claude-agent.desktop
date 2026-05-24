@@ -1,0 +1,9 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Claude Code Agent
+Comment=Launch Claude Code in the agent working directory
+Exec=xfce4-terminal --working-directory=/home/kasm-user/agent --command="bash -c 'echo Welcome — running claude in ~/agent; claude; exec bash'"
+Icon=utilities-terminal
+Terminal=false
+Categories=Development;

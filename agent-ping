@@ -1,0 +1,86 @@
+#!/usr/bin/env bash
+# Post a "needs input" notification to ClickUp as Claude AI Agent.
+#
+# Invoked by Claude Code Notification hook (JSON on stdin) or directly:
+#   echo {...} | agent-ping
+#   agent-ping "message text"
+#
+# Reads:
+#   ~/agent/.current-task — ClickUp task id to comment on (preferred)
+#   ~/agent/.current-list — ClickUp list id to auto-create a task in (fallback)
+# Env:
+#   CLICKUP_AGENT_TOKEN — required (pk_* token; falls back to ~/.clickup-agent-token)
+#   KASM_HASH, KASM_SERVER — populated by Kasm at session start (for deep link)
+#   KASM_ROLE_LABEL — human-friendly role name shown in the comment (e.g. "General")
+
+set -uo pipefail
+LOG=/tmp/agent-ping.log
+exec >>"$LOG" 2>&1
+echo "=== $(date -u +%FT%TZ) agent-ping invoked (pid $$) ==="
+
+# 1) Parse message from stdin JSON or $1
+MESSAGE=""
+if [ ! -t 0 ]; then
+  PAYLOAD=$(cat)
+  if [ -n "$PAYLOAD" ]; then
+    MESSAGE=$(echo "$PAYLOAD" | jq -r ".message // empty" 2>/dev/null || true)
+    [ -z "$MESSAGE" ] && MESSAGE="$PAYLOAD"
+  fi
+fi
+[ -z "$MESSAGE" ] && [ -n "${1:-}" ] && MESSAGE="$1"
+if [ -z "$MESSAGE" ]; then echo "no message; aborting"; exit 0; fi
+
+# 2) Token
+TOKEN="${CLICKUP_AGENT_TOKEN:-}"
+if [ -z "$TOKEN" ] && [ -f "$HOME/.clickup-agent-token" ]; then
+  TOKEN=$(tr -d "[:space:]" < "$HOME/.clickup-agent-token")
+fi
+if [ -z "$TOKEN" ] && [ -f /etc/clickup-agent-token ]; then
+  TOKEN=$(tr -d "[:space:]" < /etc/clickup-agent-token)
+fi
+if [ -z "$TOKEN" ]; then echo "no token; aborting"; exit 1; fi
+
+# 3) Resolve target task
+TASK_FILE="$HOME/agent/.current-task"
+LIST_FILE="$HOME/agent/.current-list"
+TASK_ID=""
+[ -f "$TASK_FILE" ] && TASK_ID=$(tr -d "[:space:]" < "$TASK_FILE")
+
+if [ -z "$TASK_ID" ]; then
+  LIST_ID=""
+  [ -f "$LIST_FILE" ] && LIST_ID=$(tr -d "[:space:]" < "$LIST_FILE")
+  if [ -z "$LIST_ID" ]; then
+    echo "no current task and no current list — set ~/agent/.current-task or ~/agent/.current-list first"
+    exit 1
+  fi
+  TITLE=$(echo "$MESSAGE" | head -c 80 | tr "\n" " " | sed "s/[[:space:]]\+$//")
+  [ -z "$TITLE" ] && TITLE="Agent needs input"
+  CREATED=$(curl -fsS -X POST "https://api.clickup.com/api/v2/list/$LIST_ID/task" \
+    -H "Authorization: $TOKEN" \
+    -H "Content-Type: application/json" \
+    -d "$(jq -nc --arg name "$TITLE" --arg desc "Auto-created by agent-ping; agent waiting on input." "{name:\$name, description:\$desc}")")
+  TASK_ID=$(echo "$CREATED" | jq -r ".id // empty")
+  if [ -z "$TASK_ID" ]; then echo "create task failed: $CREATED"; exit 1; fi
+  echo "$TASK_ID" > "$TASK_FILE"
+  echo "created task $TASK_ID in list $LIST_ID"
+fi
+
+# 4) Deep link
+ROLE_LABEL="${KASM_ROLE_LABEL:-workspace}"
+SESSION_BASE="${KASM_SERVER:-https://178.105.25.255}"
+if [ -n "${KASM_HASH:-}" ]; then
+  SESSION_URL="${SESSION_BASE}/#/connect/kasm/${KASM_HASH}"
+else
+  SESSION_URL="${SESSION_BASE}/#/"
+fi
+
+# 5) Post comment
+BODY=$(printf "%s\n\n%s\n\n→ [Open workspace](%s)" \
+  ":robot_face: **Needs input on ${ROLE_LABEL}**" \
+  "$MESSAGE" \
+  "$SESSION_URL")
+RESP=$(curl -fsS -X POST "https://api.clickup.com/api/v2/task/$TASK_ID/comment" \
+  -H "Authorization: $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "$(jq -nc --arg c "$BODY" "{comment_text:\$c}")") || { echo "comment post failed"; exit 1; }
+echo "posted to $TASK_ID: $RESP"

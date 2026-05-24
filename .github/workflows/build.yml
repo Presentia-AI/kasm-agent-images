@@ -1,0 +1,25 @@
+name: Build Docker image
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build (validation only — no push yet)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          provenance: false
+          tags: presentia-agent-general:ci-${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
