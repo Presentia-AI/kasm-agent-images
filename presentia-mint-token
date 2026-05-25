@@ -11,10 +11,14 @@ set -euo pipefail
 APP_ID=3845322
 INSTALL_ID=135293445
 PEM=/etc/presentia/github-app.pem
-OUT=/var/lib/kasm-secrets/github-token
+# Output goes in a dedicated subdir because Kasm's volume helper can only
+# bind-mount directories, not individual files. The parent /var/lib/kasm-secrets
+# stays root:root 700 (only root needs to manage it); the agent-creds subdir
+# is 755 so Kasm's volume helper can traverse it.
+OUT=/var/lib/kasm-secrets/agent-creds/github-token
 
 mkdir -p "$(dirname "$OUT")"
-chmod 700 "$(dirname "$OUT")"
+chmod 755 "$(dirname "$OUT")"
 
 b64url() { openssl base64 -A | tr '+/' '-_' | tr -d '='; }
 

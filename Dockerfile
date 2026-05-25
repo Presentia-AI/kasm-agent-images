@@ -46,10 +46,17 @@ RUN chmod +x /usr/local/bin/agent-ping
 # GitHub App installation token (refreshed by the host cron) and emits
 # git's credential protocol. The /etc/gitconfig stanza below scopes it to
 # the agent-workspace repo so it can never leak to unrelated clones.
+# Both URL forms (with and without ".git") are registered because git's
+# credential URL matcher does component-wise path-prefix matching — the
+# trailing ".git" makes "agent-workspace" not a matching component prefix
+# of "agent-workspace.git", so without both stanzas the helper silently
+# never fires on real `git push` / `git fetch` calls.
 COPY presentia-gh-token /usr/local/bin/presentia-gh-token
 RUN chmod +x /usr/local/bin/presentia-gh-token \
  && printf '%s\n' \
     '[credential "https://github.com/Presentia-AI/agent-workspace"]' \
+    '    helper = /usr/local/bin/presentia-gh-token' \
+    '[credential "https://github.com/Presentia-AI/agent-workspace.git"]' \
     '    helper = /usr/local/bin/presentia-gh-token' \
     >> /etc/gitconfig
 
