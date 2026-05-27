@@ -2,11 +2,17 @@ FROM kasmweb/ubuntu-jammy-desktop:1.17.0
 
 USER root
 
-# Node 20 + git, tmux for session resilience, sudo for in-workspace package mgmt.
+# Node 20 + git, tmux for session resilience, sudo for in-workspace package mgmt,
+# gh CLI for the agent's session-branch + PR self-improvement loop.
 # Auth to the tooling repo is via the presentia-agent-tooling GitHub App (HTTPS
 # + bind-mounted installation token), so no openssh-client / ssh-key plumbing.
+# gh reads the same token via GH_TOKEN env (set in /etc/presentia-hooks.sh).
 RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
- && apt-get install -y --no-install-recommends nodejs git jq tmux sudo \
+ && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg \
+ && chmod a+r /usr/share/keyrings/githubcli-archive-keyring.gpg \
+ && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" > /etc/apt/sources.list.d/github-cli.list \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends nodejs git jq tmux sudo gh \
  && rm -rf /var/lib/apt/lists/* \
  && npm install -g @anthropic-ai/claude-code chrome-devtools-mcp
 

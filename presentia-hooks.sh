@@ -6,6 +6,16 @@
 # Loaded for every shell on the image; the heavy interactive setup is gated on
 # $PS1 at the bottom.
 
+# Make the GitHub App installation token available to gh CLI for the rest of
+# the session. The token file is bind-mounted from the host (refreshed by cron
+# every 50 min) and read by /usr/local/bin/presentia-gh-token for git too.
+__presentia_setup_gh_auth() {
+  local token_file="/etc/presentia/github-token"
+  if [ -r "$token_file" ]; then
+    export GH_TOKEN="$(cat "$token_file")"
+  fi
+}
+
 # Ensure chrome-devtools MCP is registered in this user's Claude Code config.
 __presentia_ensure_chrome_devtools_mcp() {
   local cfg="$HOME/.claude.json"
@@ -35,31 +45,27 @@ __presentia_ensure_notification_hook() {
     && mv "$tmp" "$cfg"
 }
 
-# One-time fixup for existing persistent profiles whose Desktop/google-chrome.desktop
-# still points at /usr/bin/google-chrome (bypasses the debug-port wrapper).
-__presentia_fix_chrome_desktop_icon() {
-  local f="$HOME/Desktop/google-chrome.desktop"
-  [ -f "$f" ] || return 0
-  grep -q '^Exec=/usr/bin/google-chrome' "$f" 2>/dev/null || return 0
-  sed -i 's|^Exec=/usr/bin/google-chrome|Exec=/usr/local/bin/google-chrome|g' "$f" 2>/dev/null || true
-}
-
-# Clone / refresh the agent-workspace tooling repo and wire role-scoped files
-# into ~/agent. Auths via the presentia-agent-tooling GitHub App: the host
-# mints an installation token via cron and bind-mounts it at
-# /etc/presentia/github-token; the credential helper at
-# /usr/local/bin/presentia-gh-token (wired into /etc/gitconfig at image build)
-# feeds the token to git over HTTPS. The App private key never enters the
-# container.
+# Fresh-clone agent-workspace, create a session-unique branch off main, push
+# it up so the branch persists even if this container dies mid-task. Then
+# symlink the agent-facing files (CLAUDE.md, memory, agent-skills) into
+# locations Claude Code reads.
+#
+# Containers are now non-persistent (no /home/kasm-user bind-mount). Each
+# session is therefore a fresh clone — no "if exists, pull" path.
+#
+# Auths via the presentia-agent-tooling GitHub App: the host mints an
+# installation token via cron and bind-mounts it at /etc/presentia/github-token;
+# the credential helper at /usr/local/bin/presentia-gh-token (wired into
+# /etc/gitconfig at image build) feeds the token to git over HTTPS.
 #
 # Sets:
-#   ~/agent/tooling/                — clone of Presentia-AI/agent-workspace
-#   ~/agent/active-role -> tooling/$ROLE
-#   ~/agent/{CLAUDE,AGENT-CRON-PROMPT,PROCESSES}.md -> tooling/$ROLE/...
+#   ~/agent/tooling/                     — fresh clone of Presentia-AI/agent-workspace
+#                                          on branch agent/session-<ts>-<rand>
+#   ~/agent/CLAUDE.md  -> tooling/general-purpose/CLAUDE.md
 #   ~/.claude/projects/-home-kasm-user-agent/memory -> tooling/memory
-#   ~/.claude/skills -> tooling/agent-skills
-__presentia_ensure_tooling() {
-  local role="${KASM_ROLE_LABEL:-general-purpose}"
+#   ~/.claude/skills   -> tooling/agent-skills
+#   ~/agent/SESSION_BRANCH               — bare branch name for easy reference
+__presentia_ensure_session() {
   local agent_dir="$HOME/agent"
   local tooling="$agent_dir/tooling"
   local repo="https://github.com/Presentia-AI/agent-workspace.git"
@@ -79,22 +85,28 @@ The agent tooling repo clone can't proceed because the installation token
 isn't bind-mounted into this container.
 
 Expected file: \`$token_file\` (mode 600, owned by uid 1000)
-Host source:   \`/var/lib/kasm-secrets/github-token\` on kasm-01
+Host source:   \`/var/lib/kasm-secrets/agent-creds/github-token\` on kasm-01
 Host minter:   \`/usr/local/bin/presentia-mint-token\` (cron every 50 min)
 
-Fix: on kasm-01, confirm the Kasm workspace docker_run_config bind-mounts
-\`/var/lib/kasm-secrets/github-token:/etc/presentia/github-token:ro\`, then
-relaunch this session.
+Fix: on kasm-01, confirm the Kasm image row's volume_mappings bind-mounts
+\`/var/lib/kasm-secrets/agent-creds:/etc/presentia:ro\`, then relaunch this
+session.
 EOF
     return 1
   fi
   rm -f "$notice"
 
-  # Clone (or pull) the tooling repo. The credential helper baked into
-  # /etc/gitconfig supplies x-access-token + the installation token.
-  if [ ! -d "$tooling/.git" ]; then
-    if ! git clone --quiet "$repo" "$tooling" 2>/dev/null; then
-      cat > "$notice" <<EOF
+  # Skip if already initialized this boot (subsequent shells in the same
+  # session shouldn't re-clone or create a new branch).
+  if [ -d "$tooling/.git" ] && [ -f "$agent_dir/SESSION_BRANCH" ]; then
+    return 0
+  fi
+
+  # Fresh clone. Container is ephemeral, so anything sitting in $tooling from
+  # a stale state is wiped — the source of truth is the branch on the remote.
+  rm -rf "$tooling"
+  if ! git clone --quiet "$repo" "$tooling" 2>/dev/null; then
+    cat > "$notice" <<EOF
 # Tooling clone failed
 
 GitHub App token is mounted at \`$token_file\` but \`git clone $repo\`
@@ -103,41 +115,51 @@ still failed. Likely causes:
   - App installation removed or repo removed from installation scope
   - Network egress blocked
 EOF
-      return 1
-    fi
-  else
-    (cd "$tooling" && git pull --rebase --quiet 2>/dev/null) || true
+    return 1
   fi
 
-  # Symlink role-scoped files into ~/agent/ so existing tooling that reads
-  # ~/agent/CLAUDE.md keeps working.
-  local role_dir="$tooling/$role"
-  if [ -d "$role_dir" ]; then
-    ln -sfn "$role_dir" "$agent_dir/active-role"
-    local f
-    for f in CLAUDE.md AGENT-CRON-PROMPT.md PROCESSES.md; do
-      [ -e "$role_dir/$f" ] && ln -sfn "$role_dir/$f" "$agent_dir/$f"
-    done
+  # Configure commit identity for this clone.
+  git -C "$tooling" config user.email "claude-agent@presentia.ai"
+  git -C "$tooling" config user.name  "Claude AI Agent"
+
+  # Create the session branch off whatever main is right now, and push it up
+  # so the branch exists remotely (durable record if the container dies).
+  local session_id branch
+  session_id="$(date -u +%Y%m%d-%H%M%S)-$(openssl rand -hex 3 2>/dev/null || head -c6 /dev/urandom | xxd -p)"
+  branch="agent/session-${session_id}"
+  git -C "$tooling" checkout -b "$branch" --quiet
+  if ! git -C "$tooling" push -u origin "$branch" --quiet 2>/dev/null; then
+    echo "WARN: failed to push session branch ${branch} — agent state won't persist if container dies."
+    echo "       Check App permissions: Contents:write + Pull requests:write."
   fi
 
-  # Shared memory + skills: same pattern as bin/bootstrap-workspace.sh in the
-  # CEO repo on the Mac. Slug matches the agent's CWD (~/agent).
+  printf '%s\n' "$branch" > "$agent_dir/SESSION_BRANCH"
+
+  # Symlink CLAUDE.md into ~/agent/ so Claude Code (launched from ~/agent/)
+  # finds it. No more role disambiguation — one image, one CLAUDE.md.
+  local agent_ctx="$tooling/general-purpose"
+  if [ -e "$agent_ctx/CLAUDE.md" ]; then
+    ln -sfn "$agent_ctx/CLAUDE.md" "$agent_dir/CLAUDE.md"
+  fi
+
+  # Shared memory + skills. Slug matches the agent's CWD (~/agent).
   local slug="-home-kasm-user-agent"
   local mem_parent="$HOME/.claude/projects/$slug"
   mkdir -p "$mem_parent" "$HOME/.claude"
-  [ -d "$tooling/memory" ] && ln -sfn "$tooling/memory" "$mem_parent/memory"
+  [ -d "$tooling/memory" ]       && ln -sfn "$tooling/memory"       "$mem_parent/memory"
   [ -d "$tooling/agent-skills" ] && ln -sfn "$tooling/agent-skills" "$HOME/.claude/skills"
 }
 
 if [ -n "$PS1" ] && [ -z "$TMUX" ] && [ -z "$AGENT_BANNER_SHOWN" ]; then
   export AGENT_BANNER_SHOWN=1
+  __presentia_setup_gh_auth
   __presentia_ensure_chrome_devtools_mcp
   __presentia_ensure_notification_hook
-  __presentia_fix_chrome_desktop_icon
-  if __presentia_ensure_tooling; then
-    echo "Presentia Agent ready [role=${KASM_ROLE_LABEL:-general-purpose}]. Tooling synced. Auto-attaching tmux session [main]..."
+  if __presentia_ensure_session; then
+    branch="$(cat ~/agent/SESSION_BRANCH 2>/dev/null || echo '?')"
+    echo "Presentia Agent ready. Session branch: ${branch}. Auto-attaching tmux session [main]..."
   else
-    echo "Presentia Agent: tooling clone failed — see ~/agent/GITHUB_APP_TOKEN_MISSING.md, then open a new terminal."
+    echo "Presentia Agent: session setup failed — see ~/agent/GITHUB_APP_TOKEN_MISSING.md, then open a new terminal."
   fi
   cd ~/agent 2>/dev/null || true
   if command -v tmux >/dev/null; then
