@@ -8,8 +8,12 @@
 # Failures in the setup functions are logged but don't abort: we'd rather drop
 # the user into a shell where they can see what went wrong than have the
 # terminal flash and close.
-
-set -u
+#
+# Deliberately NOT `set -u` — the sourced /etc/presentia-hooks.sh has a
+# `[ -n "$PS1" ]` interactive-shell gate that errors under nounset because
+# PS1 is unset in a non-interactive context. Sourcing under `set -u` aborts
+# the whole script, which is exactly the failure mode that closed the
+# terminal on first launch.
 
 if [ -r /etc/presentia-hooks.sh ]; then
   # shellcheck disable=SC1091
