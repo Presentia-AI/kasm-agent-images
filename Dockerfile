@@ -38,8 +38,9 @@ RUN printf '%s\n' \
  && sed -i 's|^Exec=/usr/bin/google-chrome|Exec=/usr/local/bin/google-chrome|g' /home/kasm-default-profile/Desktop/google-chrome.desktop
 
 # Empty agent working dir. The role-scoped CLAUDE.md, AGENT-CRON-PROMPT.md,
-# memory/, and agent-skills/ are cloned at first interactive shell from
-# Presentia-AI/agent-workspace by __presentia_ensure_tooling (see hooks file).
+# memory/, and agent-skills/ are materialized at desktop-launch time by
+# __presentia_ensure_session (see hooks file), which clones Presentia-AI/
+# agent-workspace into ~/agent/tooling and cuts a fresh agent/session-* branch.
 RUN mkdir -p /home/kasm-user/agent \
  && chown -R 1000:1000 /home/kasm-user/agent
 
@@ -65,6 +66,14 @@ RUN chmod +x /usr/local/bin/presentia-gh-token \
     '[credential "https://github.com/Presentia-AI/agent-workspace.git"]' \
     '    helper = /usr/local/bin/presentia-gh-token' \
     >> /etc/gitconfig
+
+# agent-launch: the .desktop entry's `xfce4-terminal --command="bash -c ..."`
+# spawns a NON-interactive shell, so /etc/bash.bashrc (and therefore the
+# /etc/presentia-hooks.sh source) is skipped — the bootstrap clone never runs
+# and Claude starts in an empty ~/agent. This wrapper sources the hook
+# explicitly, runs the setup functions, then exec's claude.
+COPY agent-launch /usr/local/bin/agent-launch
+RUN chmod +x /usr/local/bin/agent-launch
 
 # Custom desktop launcher (kept from v0)
 COPY --chown=1000:1000 claude-agent.desktop /home/kasm-user/Desktop/claude-agent.desktop

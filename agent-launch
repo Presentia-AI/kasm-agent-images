@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+# Launched by the Claude Code Agent .desktop entry. The .desktop's
+# `xfce4-terminal --command="bash -c ..."` form runs a NON-interactive shell,
+# so /etc/bash.bashrc (and therefore /etc/presentia-hooks.sh) is skipped — the
+# bootstrap clone never happens and the agent starts in an empty ~/agent. This
+# wrapper sources the hook explicitly so the bootstrap runs before claude.
+#
+# Failures in the setup functions are logged but don't abort: we'd rather drop
+# the user into a shell where they can see what went wrong than have the
+# terminal flash and close.
+
+set -u
+
+if [ -r /etc/presentia-hooks.sh ]; then
+  # shellcheck disable=SC1091
+  source /etc/presentia-hooks.sh
+  __presentia_setup_gh_auth                || echo "WARN: __presentia_setup_gh_auth failed"
+  __presentia_ensure_chrome_devtools_mcp   || echo "WARN: __presentia_ensure_chrome_devtools_mcp failed"
+  __presentia_ensure_notification_hook     || echo "WARN: __presentia_ensure_notification_hook failed"
+  if __presentia_ensure_session; then
+    branch="$(cat "$HOME/agent/SESSION_BRANCH" 2>/dev/null || echo '?')"
+    echo "Presentia Agent ready. Session branch: ${branch}"
+  else
+    echo "Bootstrap failed — see ~/agent/GITHUB_APP_TOKEN_MISSING.md, then re-launch."
+    exec bash
+  fi
+else
+  echo "WARN: /etc/presentia-hooks.sh missing — running claude without bootstrap."
+fi
+
+cd "$HOME/agent" 2>/dev/null || true
+claude
+exec bash
