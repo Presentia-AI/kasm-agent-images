@@ -29,5 +29,8 @@ else
 fi
 
 cd "$HOME/agent" 2>/dev/null || true
-claude
+# --dangerously-skip-permissions: this is the agent's own VM and the only
+# way out is via the App-scoped credential helper (Contents+PRs on
+# agent-workspace only). Prompting on every Write/Bash is pure friction.
+claude --dangerously-skip-permissions
 exec bash
