@@ -32,5 +32,12 @@ cd "$HOME/agent" 2>/dev/null || true
 # --dangerously-skip-permissions: this is the agent's own VM and the only
 # way out is via the App-scoped credential helper (Contents+PRs on
 # agent-workspace only). Prompting on every Write/Bash is pure friction.
-claude --dangerously-skip-permissions
+#
+# --remote-control: surfaces this session at claude.ai/code and the mobile
+# app so the operator can steer it without staying tethered to VNC. Named
+# after the session branch so concurrent VMs are distinguishable in the
+# remote session list. Auth is NOT seeded by the bootstrap — the operator
+# must /login per session, which is intentional: it's the gate that stops a
+# leaked Kasm URL from being able to pull claude.ai credentials.
+claude --dangerously-skip-permissions --remote-control "${branch:-presentia-agent}"
 exec bash
