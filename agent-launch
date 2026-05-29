@@ -20,6 +20,7 @@ if [ -r /etc/presentia-hooks.sh ]; then
   source /etc/presentia-hooks.sh
   __presentia_setup_gh_auth                || echo "WARN: __presentia_setup_gh_auth failed"
   __presentia_ensure_chrome_devtools_mcp   || echo "WARN: __presentia_ensure_chrome_devtools_mcp failed"
+  __presentia_ensure_chrome_running        || echo "WARN: __presentia_ensure_chrome_running failed"
   __presentia_ensure_notification_hook     || echo "WARN: __presentia_ensure_notification_hook failed"
   if __presentia_ensure_session; then
     branch="$(cat "$HOME/agent/SESSION_BRANCH" 2>/dev/null || echo '?')"
