@@ -17,17 +17,58 @@ __presentia_setup_gh_auth() {
 }
 
 # Ensure chrome-devtools MCP is registered in this user's Claude Code config.
+#
+# Uses `--browserUrl` to attach to an externally-managed Chrome on
+# 127.0.0.1:9222 rather than letting the MCP spawn and own its own browser.
+# That decoupling matters: when the MCP owns Chrome, any agent that pkill's
+# Chrome (e.g. trying to fix a port issue) leaves the MCP holding a dead
+# browser handle that returns `Target closed` on every subsequent call —
+# unrecoverable for the rest of the Claude Code session. In attach mode the
+# MCP just reconnects on the next call once Chrome is back up.
+#
+# Companion: __presentia_ensure_chrome_running keeps a Chrome on :9222.
 __presentia_ensure_chrome_devtools_mcp() {
   local cfg="$HOME/.claude.json"
-  if [ -f "$cfg" ] && grep -q '"chrome-devtools"' "$cfg" 2>/dev/null; then
-    return 0
-  fi
   command -v jq >/dev/null || return 0
   [ -f "$cfg" ] || echo '{}' > "$cfg"
+  # No-op if the entry is already in the target shape (idempotent across shells).
+  if jq -e '.mcpServers["chrome-devtools"] == {"type":"stdio","command":"chrome-devtools-mcp","args":["--browserUrl","http://127.0.0.1:9222"]}' "$cfg" >/dev/null 2>&1; then
+    return 0
+  fi
   local tmp
   tmp=$(mktemp) || return 1
-  jq '.mcpServers["chrome-devtools"] = {"type":"stdio","command":"chrome-devtools-mcp","args":[]}' "$cfg" > "$tmp" \
+  jq '.mcpServers["chrome-devtools"] = {"type":"stdio","command":"chrome-devtools-mcp","args":["--browserUrl","http://127.0.0.1:9222"]}' "$cfg" > "$tmp" \
     && mv "$tmp" "$cfg"
+}
+
+# Ensure Chrome is running with the DevTools Protocol on 127.0.0.1:9222 so the
+# chrome-devtools MCP (configured to attach via --browserUrl) has a browser to
+# connect to. Idempotent — no-op if /json/version already responds.
+#
+# Chrome is launched via /usr/local/bin/google-chrome, the image-baked wrapper
+# that always adds --remote-debugging-port=9222 (see Dockerfile). Backgrounded
+# with nohup + disown so it survives this shell exiting.
+__presentia_ensure_chrome_running() {
+  if curl -sS -m 2 -o /dev/null http://127.0.0.1:9222/json/version 2>/dev/null; then
+    return 0
+  fi
+  if [ ! -x /usr/local/bin/google-chrome ]; then
+    echo "WARN: /usr/local/bin/google-chrome wrapper missing — chrome-devtools MCP won't find a browser."
+    return 0
+  fi
+  nohup /usr/local/bin/google-chrome about:blank > /tmp/chrome-agent.log 2>&1 &
+  disown 2>/dev/null || true
+  # Wait briefly for the debug port to come up. Don't block long — if Chrome
+  # is slow to start, the MCP will surface the error on the first tool call
+  # and the agent can react. ~5s is enough for a warm container.
+  local i
+  for i in $(seq 1 20); do
+    if curl -sS -m 1 -o /dev/null http://127.0.0.1:9222/json/version 2>/dev/null; then
+      return 0
+    fi
+    sleep 0.25
+  done
+  echo "WARN: Chrome on :9222 didn't come up within ~5s — check /tmp/chrome-agent.log."
 }
 
 # Ensure agent-ping is wired as the Claude Code Notification hook.
@@ -154,6 +195,7 @@ if [ -n "$PS1" ] && [ -z "$TMUX" ] && [ -z "$AGENT_BANNER_SHOWN" ]; then
   export AGENT_BANNER_SHOWN=1
   __presentia_setup_gh_auth
   __presentia_ensure_chrome_devtools_mcp
+  __presentia_ensure_chrome_running
   __presentia_ensure_notification_hook
   if __presentia_ensure_session; then
     branch="$(cat ~/agent/SESSION_BRANCH 2>/dev/null || echo '?')"
