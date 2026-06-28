@@ -86,6 +86,117 @@ __presentia_ensure_notification_hook() {
     && mv "$tmp" "$cfg"
 }
 
+# Resolve which role context CLAUDE.md this session should symlink, based on
+# $AGENT_ROLE. Default = general-purpose (preserves previous behaviour for
+# every existing Kasm session). New roles:
+#   dev       — autonomous dev agent (see Presentia-AI/agent-workspace
+#               dev-agent/CLAUDE.md and DEV-AGENT-PROMPT.md). Adds clone of
+#               presentia-ai under ~/work/, dep install, and a marker the
+#               agent uses on first message to register its CronCreate loop.
+#
+# Unknown roles fall back to general-purpose with a warning so a typo in
+# $AGENT_ROLE never silently breaks the bootstrap.
+__presentia_resolve_role_context() {
+  local tooling="$HOME/agent/tooling"
+  case "${AGENT_ROLE:-general}" in
+    general|"")
+      printf '%s\n' "$tooling/general-purpose/CLAUDE.md"
+      ;;
+    ceo)
+      if [ -f "$tooling/ceo/CLAUDE.md" ]; then
+        printf '%s\n' "$tooling/ceo/CLAUDE.md"
+      else
+        echo "WARN: AGENT_ROLE=ceo but $tooling/ceo/CLAUDE.md missing; falling back to general-purpose." >&2
+        printf '%s\n' "$tooling/general-purpose/CLAUDE.md"
+      fi
+      ;;
+    dev)
+      if [ -f "$tooling/dev-agent/CLAUDE.md" ]; then
+        printf '%s\n' "$tooling/dev-agent/CLAUDE.md"
+      else
+        echo "WARN: AGENT_ROLE=dev but $tooling/dev-agent/CLAUDE.md missing; falling back to general-purpose." >&2
+        printf '%s\n' "$tooling/general-purpose/CLAUDE.md"
+      fi
+      ;;
+    *)
+      echo "WARN: AGENT_ROLE=$AGENT_ROLE is not recognised; falling back to general-purpose." >&2
+      printf '%s\n' "$tooling/general-purpose/CLAUDE.md"
+      ;;
+  esac
+}
+
+# Dev-agent-specific workspace bootstrap. Clones (or refreshes) the
+# Presentia-AI/presentia-ai repo to ~/work/presentia-ai on the `staging`
+# branch, runs `pnpm install` if needed, and warms Playwright Chromium so the
+# agent's first hourly fire doesn't pay the cold-start cost.
+#
+# Idempotent. Safe to call from every shell — gated by the AGENT_ROLE
+# dispatcher in __presentia_ensure_session.
+#
+# Auth reuses the GitHub App installation token at /etc/presentia/github-token,
+# but the URL match needs the credential helper to be wired for the
+# presentia-ai URL too. The Dockerfile change in this PR adds that.
+__presentia_ensure_dev_workspace() {
+  local work_root="$HOME/work"
+  local repo="$work_root/presentia-ai"
+  local token_file="/etc/presentia/github-token"
+
+  if [ ! -r "$token_file" ]; then
+    echo "WARN: $token_file missing; dev-agent can't clone presentia-ai." >&2
+    return 1
+  fi
+
+  mkdir -p "$work_root"
+
+  if [ ! -d "$repo/.git" ]; then
+    rm -rf "$repo"
+    local token
+    token="$(cat "$token_file")"
+    if ! git clone --quiet \
+        "https://x-access-token:${token}@github.com/Presentia-AI/presentia-ai.git" \
+        "$repo" 2>/dev/null; then
+      echo "WARN: clone of presentia-ai failed. Confirm the presentia-agent-tooling App is installed on the repo with Contents:write + Pull requests:write." >&2
+      return 1
+    fi
+    git -C "$repo" config user.email "claude-agent@presentia.ai"
+    git -C "$repo" config user.name  "Claude AI Agent"
+  fi
+
+  # Stay on staging — dev-agent always branches off origin/staging per
+  # DEV-AGENT-PROMPT.md. Don't auto-reset; if there's local WIP the agent
+  # needs to handle, the cron loop's Step 0 will clean it up explicitly.
+  git -C "$repo" fetch origin --quiet 2>/dev/null || true
+  if ! git -C "$repo" rev-parse --verify --quiet staging >/dev/null; then
+    git -C "$repo" checkout -B staging origin/staging --quiet 2>/dev/null || \
+      echo "WARN: presentia-ai 'staging' branch not found on origin." >&2
+  fi
+
+  # Install JS deps if missing or lockfile is newer. Cheap to check, expensive
+  # to run, so we gate it.
+  if [ -f "$repo/pnpm-lock.yaml" ] && command -v pnpm >/dev/null; then
+    if [ ! -f "$repo/node_modules/.modules.yaml" ] || \
+       [ "$repo/pnpm-lock.yaml" -nt "$repo/node_modules/.modules.yaml" ]; then
+      ( cd "$repo" && pnpm install --silent ) || \
+        echo "WARN: pnpm install failed in $repo." >&2
+    fi
+  fi
+
+  # Warm Playwright chromium so first browser-driven test isn't slow. Best
+  # effort; non-fatal if it errors.
+  if command -v npx >/dev/null; then
+    ( cd "$repo" && npx --no-install playwright install chromium --with-deps >/dev/null 2>&1 ) || true
+  fi
+
+  # First-boot marker for the dev-agent. The role CLAUDE.md instructs the
+  # agent to check for this file on its first message and register a
+  # CronCreate for DEV-AGENT-PROMPT.md at `0 * * * *` cadence, then remove
+  # the marker. The shell can't call CronCreate (it's a Claude tool, not a
+  # binary), so this hand-off file is the bridge.
+  if [ ! -f "$HOME/agent/.dev-agent-cron-registered" ]; then
+    touch "$HOME/agent/.dev-agent-needs-cron-registration"
+  fi
+}
+
 # Fresh-clone agent-workspace, create a session-unique branch off main, push
 # it up so the branch persists even if this container dies mid-task. Then
 # symlink the agent-facing files (CLAUDE.md, memory, agent-skills) into
@@ -102,10 +213,13 @@ __presentia_ensure_notification_hook() {
 # Sets:
 #   ~/agent/tooling/                     — fresh clone of Presentia-AI/agent-workspace
 #                                          on branch agent/session-<ts>-<rand>
-#   ~/agent/CLAUDE.md  -> tooling/general-purpose/CLAUDE.md
+#   ~/agent/CLAUDE.md  -> tooling/<role>/CLAUDE.md   (role from $AGENT_ROLE)
 #   ~/.claude/projects/-home-kasm-user-agent/memory -> tooling/memory
 #   ~/.claude/skills   -> tooling/agent-skills
 #   ~/agent/SESSION_BRANCH               — bare branch name for easy reference
+#
+# Role-specific post-setup: when AGENT_ROLE=dev, also bootstraps the
+# presentia-ai workspace under ~/work/. Other roles get a no-op.
 __presentia_ensure_session() {
   local agent_dir="$HOME/agent"
   local tooling="$agent_dir/tooling"
@@ -140,6 +254,12 @@ EOF
   # Skip if already initialized this boot (subsequent shells in the same
   # session shouldn't re-clone or create a new branch).
   if [ -d "$tooling/.git" ] && [ -f "$agent_dir/SESSION_BRANCH" ]; then
+    # Still re-resolve role symlink + ensure dev workspace if applicable, in
+    # case the bootstrap was interrupted mid-session.
+    local ctx_after_skip
+    ctx_after_skip="$(__presentia_resolve_role_context)"
+    [ -n "$ctx_after_skip" ] && ln -sfn "$ctx_after_skip" "$agent_dir/CLAUDE.md"
+    [ "${AGENT_ROLE:-general}" = "dev" ] && __presentia_ensure_dev_workspace
     return 0
   fi
 
@@ -176,11 +296,13 @@ EOF
 
   printf '%s\n' "$branch" > "$agent_dir/SESSION_BRANCH"
 
-  # Symlink CLAUDE.md into ~/agent/ so Claude Code (launched from ~/agent/)
-  # finds it. No more role disambiguation — one image, one CLAUDE.md.
-  local agent_ctx="$tooling/general-purpose"
-  if [ -e "$agent_ctx/CLAUDE.md" ]; then
-    ln -sfn "$agent_ctx/CLAUDE.md" "$agent_dir/CLAUDE.md"
+  # Symlink the role-specific CLAUDE.md into ~/agent/ so Claude Code (launched
+  # from ~/agent/) finds it. $AGENT_ROLE picks which role context to use;
+  # default is general-purpose, preserving previous single-role behaviour.
+  local ctx
+  ctx="$(__presentia_resolve_role_context)"
+  if [ -n "$ctx" ] && [ -e "$ctx" ]; then
+    ln -sfn "$ctx" "$agent_dir/CLAUDE.md"
   fi
 
   # Shared memory + skills. Slug matches the agent's CWD (~/agent).
@@ -189,6 +311,12 @@ EOF
   mkdir -p "$mem_parent" "$HOME/.claude"
   [ -d "$tooling/memory" ]       && ln -sfn "$tooling/memory"       "$mem_parent/memory"
   [ -d "$tooling/agent-skills" ] && ln -sfn "$tooling/agent-skills" "$HOME/.claude/skills"
+
+  # Role-specific post-setup. dev agent needs a presentia-ai checkout under
+  # ~/work/ before the first cron fire can do anything useful.
+  if [ "${AGENT_ROLE:-general}" = "dev" ]; then
+    __presentia_ensure_dev_workspace
+  fi
 }
 
 if [ -n "$PS1" ] && [ -z "$TMUX" ] && [ -z "$AGENT_BANNER_SHOWN" ]; then
@@ -199,7 +327,8 @@ if [ -n "$PS1" ] && [ -z "$TMUX" ] && [ -z "$AGENT_BANNER_SHOWN" ]; then
   __presentia_ensure_notification_hook
   if __presentia_ensure_session; then
     branch="$(cat ~/agent/SESSION_BRANCH 2>/dev/null || echo '?')"
-    echo "Presentia Agent ready. Session branch: ${branch}. Auto-attaching tmux session [main]..."
+    role="${AGENT_ROLE:-general}"
+    echo "Presentia Agent ready (role=${role}). Session branch: ${branch}. Auto-attaching tmux session [main]..."
   else
     echo "Presentia Agent: session setup failed — see ~/agent/GITHUB_APP_TOKEN_MISSING.md, then open a new terminal."
   fi
