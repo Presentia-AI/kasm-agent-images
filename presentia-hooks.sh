@@ -118,6 +118,22 @@ __presentia_resolve_role_context() {
         printf '%s\n' "$tooling/general-purpose/CLAUDE.md"
       fi
       ;;
+    marketing)
+      if [ -f "$tooling/marketing-agent/CLAUDE.md" ]; then
+        printf '%s\n' "$tooling/marketing-agent/CLAUDE.md"
+      else
+        echo "WARN: AGENT_ROLE=marketing but $tooling/marketing-agent/CLAUDE.md missing; falling back to general-purpose." >&2
+        printf '%s\n' "$tooling/general-purpose/CLAUDE.md"
+      fi
+      ;;
+    finance)
+      if [ -f "$tooling/finance-agent/CLAUDE.md" ]; then
+        printf '%s\n' "$tooling/finance-agent/CLAUDE.md"
+      else
+        echo "WARN: AGENT_ROLE=finance but $tooling/finance-agent/CLAUDE.md missing; falling back to general-purpose." >&2
+        printf '%s\n' "$tooling/general-purpose/CLAUDE.md"
+      fi
+      ;;
     *)
       echo "WARN: AGENT_ROLE=$AGENT_ROLE is not recognised; falling back to general-purpose." >&2
       printf '%s\n' "$tooling/general-purpose/CLAUDE.md"
