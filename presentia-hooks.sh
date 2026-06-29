@@ -141,6 +141,24 @@ __presentia_resolve_role_context() {
   esac
 }
 
+# Drop a first-boot marker telling a role agent to self-register its CronCreate
+# loop on its first message. The agent registers the cron, writes
+# .<role>-agent-cron-registered, and removes the -needs- marker so later shells
+# in the same session don't re-drop it. The shell can't call CronCreate (it's a
+# Claude tool, not a binary), so this hand-off file is the bridge — the same
+# mechanism the dev agent uses inside __presentia_ensure_dev_workspace.
+#
+# Containers are ephemeral, so a cron lives only as long as its session. This
+# marker makes every fresh boot re-arm the loop without the operator having to
+# hand-type CronCreate.
+__presentia_ensure_cron_marker() {
+  local role="${1:?role required}"
+  local agent_dir="$HOME/agent"
+  if [ ! -f "$agent_dir/.${role}-agent-cron-registered" ]; then
+    touch "$agent_dir/.${role}-agent-needs-cron-registration"
+  fi
+}
+
 # Dev-agent-specific workspace bootstrap. Clones (or refreshes) the
 # Presentia-AI/presentia-ai repo to ~/work/presentia-ai on the `staging`
 # branch, runs `pnpm install` if needed, and warms Playwright Chromium so the
@@ -270,12 +288,15 @@ EOF
   # Skip if already initialized this boot (subsequent shells in the same
   # session shouldn't re-clone or create a new branch).
   if [ -d "$tooling/.git" ] && [ -f "$agent_dir/SESSION_BRANCH" ]; then
-    # Still re-resolve role symlink + ensure dev workspace if applicable, in
+    # Still re-resolve role symlink + run role post-setup if applicable, in
     # case the bootstrap was interrupted mid-session.
     local ctx_after_skip
     ctx_after_skip="$(__presentia_resolve_role_context)"
     [ -n "$ctx_after_skip" ] && ln -sfn "$ctx_after_skip" "$agent_dir/CLAUDE.md"
-    [ "${AGENT_ROLE:-general}" = "dev" ] && __presentia_ensure_dev_workspace
+    case "${AGENT_ROLE:-general}" in
+      dev)               __presentia_ensure_dev_workspace ;;
+      finance|marketing) __presentia_ensure_cron_marker "${AGENT_ROLE}" ;;
+    esac
     return 0
   fi
 
@@ -328,11 +349,13 @@ EOF
   [ -d "$tooling/memory" ]       && ln -sfn "$tooling/memory"       "$mem_parent/memory"
   [ -d "$tooling/agent-skills" ] && ln -sfn "$tooling/agent-skills" "$HOME/.claude/skills"
 
-  # Role-specific post-setup. dev agent needs a presentia-ai checkout under
-  # ~/work/ before the first cron fire can do anything useful.
-  if [ "${AGENT_ROLE:-general}" = "dev" ]; then
-    __presentia_ensure_dev_workspace
-  fi
+  # Role-specific post-setup. dev needs a presentia-ai checkout under ~/work/
+  # before its first cron fire can do anything useful; finance and marketing
+  # just need their first-boot cron-registration marker so they self-arm.
+  case "${AGENT_ROLE:-general}" in
+    dev)               __presentia_ensure_dev_workspace ;;
+    finance|marketing) __presentia_ensure_cron_marker "${AGENT_ROLE}" ;;
+  esac
 }
 
 if [ -n "$PS1" ] && [ -z "$TMUX" ] && [ -z "$AGENT_BANNER_SHOWN" ]; then
