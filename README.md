@@ -19,7 +19,7 @@ Built from `kasmweb/ubuntu-jammy-desktop:1.17.0`. Adds:
 - `/usr/local/bin/presentia-gh-token` — git credential helper that reads the bind-mounted GitHub App installation token. Wired into `/etc/gitconfig` scoped to `https://github.com/Presentia-AI/agent-workspace`.
 - `/etc/presentia-hooks.sh` (sourced from `/etc/bash.bashrc`) — on first interactive shell:
   - `__presentia_setup_gh_auth`: exports `GH_TOKEN` from `/etc/presentia/github-token` so `gh` is auto-authenticated as the App.
-  - `__presentia_ensure_session`: fresh-clones `Presentia-AI/agent-workspace` into `~/agent/tooling`, creates a session-unique branch `agent/session-<UTC-ts>-<rand>` off `main`, pushes it up, then symlinks `~/agent/CLAUDE.md → tooling/general-purpose/CLAUDE.md` and shared `memory/`/`agent-skills/` into Claude Code's data dirs. If the token isn't mounted, writes `~/agent/GITHUB_APP_TOKEN_MISSING.md` and stops.
+  - `__presentia_ensure_session`: fresh-clones `Presentia-AI/agent-workspace` into `~/agent/tooling`, creates a session-unique branch `agent/session-<UTC-ts>-<rand>` off `main`, pushes it up, then symlinks `~/agent/CLAUDE.md → tooling/<role>/CLAUDE.md` (role resolved from `$AGENT_ROLE`, see below) and shared `memory/`/`agent-skills/` into Claude Code's data dirs. When `AGENT_ROLE=dev` it also runs `__presentia_ensure_dev_workspace` (clone of `presentia-ai` under `~/work/`, dep install, Playwright warm-up, cron-registration marker). If the token isn't mounted, writes `~/agent/GITHUB_APP_TOKEN_MISSING.md` and stops.
   - `__presentia_ensure_chrome_devtools_mcp`: registers `chrome-devtools` MCP in `~/.claude.json` if missing.
   - `__presentia_ensure_notification_hook`: registers `agent-ping` as the Notification hook in `~/.claude/settings.json`.
   - Auto-attaches tmux session `main`.
@@ -37,11 +37,25 @@ Containers are **non-persistent** (no `/home/kasm-user` bind-mount). Each Kasm s
 5. Jorge reviews + merges → next session pulls it at clone time.
 6. When the Kasm session is destroyed, the container goes away; the branch persists on the remote and is cleaned up by a host-side cron after 7d (if no merged PR).
 
-This replaces the old persistent-profile + role-switching model — one image, one CLAUDE.md, state lives in git.
+This replaces the old persistent-profile model — one image, state lives in git. Which agent persona a session boots as is selected per-workspace via the `AGENT_ROLE` env var (see below), not by maintaining a separate image per role.
+
+## Agent roles: `AGENT_ROLE`
+
+A single image boots as different agent personas depending on the `AGENT_ROLE` environment variable, set per Kasm workspace (in the workspace's Docker Run Config / environment block, e.g. `{"environment": {"AGENT_ROLE": "finance"}}`). `__presentia_resolve_role_context` in `presentia-hooks.sh` maps the value to the CLAUDE.md it symlinks at `~/agent/CLAUDE.md`:
+
+| `AGENT_ROLE`        | CLAUDE.md symlinked to                  | Extra setup |
+|---------------------|-----------------------------------------|-------------|
+| _(unset)_ / `general` | `tooling/general-purpose/CLAUDE.md`   | — |
+| `ceo`               | `tooling/ceo/CLAUDE.md`                 | — |
+| `dev`               | `tooling/dev-agent/CLAUDE.md`           | `__presentia_ensure_dev_workspace`: clones `presentia-ai` to `~/work/` on `staging`, installs deps, warms Playwright, drops a cron-registration marker |
+| `marketing`         | `tooling/marketing-agent/CLAUDE.md`     | — |
+| `finance`           | `tooling/finance-agent/CLAUDE.md`       | — |
+
+A role whose CLAUDE.md is missing from the clone, or an unrecognised `AGENT_ROLE`, falls back to `general-purpose` with a warning — a typo or a not-yet-merged role never silently breaks the bootstrap. Role behavior (the CLAUDE.md content and any `*-AGENT-PROMPT.md`) lives entirely in `agent-workspace`, so adding or changing a role is a tooling-repo PR, not an image rebuild.
 
 ## Repo layout
 
-Flat — one Dockerfile, supporting files alongside it. Single image type — no role distinction at the image layer.
+Flat — one Dockerfile, supporting files alongside it. Single image type; roles are a runtime distinction (`AGENT_ROLE`), not a build-time one.
 
 ```
 .
