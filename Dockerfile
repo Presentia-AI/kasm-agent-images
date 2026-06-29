@@ -65,6 +65,10 @@ RUN chmod +x /usr/local/bin/presentia-gh-token \
     '    helper = /usr/local/bin/presentia-gh-token' \
     '[credential "https://github.com/Presentia-AI/agent-workspace.git"]' \
     '    helper = /usr/local/bin/presentia-gh-token' \
+    '[credential "https://github.com/Presentia-AI/presentia-ai"]' \
+    '    helper = /usr/local/bin/presentia-gh-token' \
+    '[credential "https://github.com/Presentia-AI/presentia-ai.git"]' \
+    '    helper = /usr/local/bin/presentia-gh-token' \
     >> /etc/gitconfig
 
 # agent-launch: the .desktop entry's `xfce4-terminal --command="bash -c ..."`
