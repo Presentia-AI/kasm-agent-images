@@ -2,6 +2,10 @@ FROM kasmweb/ubuntu-jammy-desktop:1.17.0
 
 USER root
 
+# Pin Claude Code so image rebuilds are reproducible (was floating on
+# build-date `latest`). Bump this ARG to upgrade all agent VMs in one place.
+ARG CLAUDE_CODE_VERSION=2.1.220
+
 # Node 20 + git, tmux for session resilience, sudo for in-workspace package mgmt,
 # gh CLI for the agent's session-branch + PR self-improvement loop.
 # Auth to the tooling repo is via the presentia-agent-tooling GitHub App (HTTPS
@@ -14,7 +18,11 @@ RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
  && apt-get update \
  && apt-get install -y --no-install-recommends nodejs git jq tmux sudo gh \
  && rm -rf /var/lib/apt/lists/* \
- && npm install -g @anthropic-ai/claude-code chrome-devtools-mcp
+ && npm install -g @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION} chrome-devtools-mcp
+
+# Version is pinned by the image; the in-CLI auto-updater can't write to the
+# root-owned install as kasm-user, so it only ever prints a harmless failure.
+ENV DISABLE_AUTOUPDATER=1
 
 # Passwordless sudo for kasm-user (uid 1000)
 RUN echo 'kasm-user ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/kasm-user \
