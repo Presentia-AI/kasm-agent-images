@@ -11,6 +11,16 @@ ARG CLAUDE_CODE_VERSION=2.1.220
 # Auth to the tooling repo is via the presentia-agent-tooling GitHub App (HTTPS
 # + bind-mounted installation token), so no openssh-client / ssh-key plumbing.
 # gh reads the same token via GH_TOKEN env (set in /etc/presentia-hooks.sh).
+# Drop third-party apt sources inherited from the kasmweb base image that we
+# don't use. HashiCorp rotated its signing key after 2026-08-03, which makes
+# `apt-get update` fail hard (NO_PUBKEY -> "repository is not signed" -> exit
+# 100) and took the whole image build down even though nothing here wants
+# terraform. Removing the source is the fix; importing a key for a repo we
+# never install from would be pointless.
+RUN find /etc/apt/sources.list.d -type f \
+      -exec grep -lE 'apt\.releases\.hashicorp\.com' {} + 2>/dev/null \
+    | xargs -r rm -f
+
 RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
  && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg \
  && chmod a+r /usr/share/keyrings/githubcli-archive-keyring.gpg \

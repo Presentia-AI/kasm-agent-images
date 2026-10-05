@@ -231,6 +231,62 @@ __presentia_ensure_dev_workspace() {
   fi
 }
 
+# Start the ClickUp DM bridge, which lets Claude's voice mode (or any allowlisted
+# ClickUp account) drive this agent over a DM. See bridge/README.md in
+# Presentia-AI/agent-workspace.
+#
+# OPT-IN ONLY, via BRIDGE_ENABLED=1 in the Kasm image run_config. This is
+# deliberate and load-bearing: the bridge watches ONE DM channel, and if every
+# role's VM started one they would all poll the same channel and all reply to
+# the same message. Exactly one workspace should set BRIDGE_ENABLED.
+#
+# bridge.env is generated here rather than bind-mounted as a new host secret:
+# the only secret it needs is CLICKUP_AGENT_TOKEN, which run_config already
+# injects. Everything else is non-secret config with a sane default that
+# run_config can override. Written 600 and never committed.
+#
+# Idempotent: an existing bridge.env is left alone, and bridge-ctl start is a
+# no-op when the bridge is already running.
+__presentia_ensure_dm_bridge() {
+  [ "${BRIDGE_ENABLED:-0}" = "1" ] || return 0
+
+  local tooling="$HOME/agent/tooling"
+  local ctl="$tooling/bridge/bridge-ctl"
+  local runtime="${BRIDGE_RUNTIME_DIR:-$HOME/agent/bridge}"
+
+  if [ ! -x "$ctl" ]; then
+    echo "WARN: BRIDGE_ENABLED=1 but $ctl missing — is the tooling repo clone current?" >&2
+    return 0
+  fi
+  if [ -z "${CLICKUP_AGENT_TOKEN:-}" ]; then
+    echo "WARN: BRIDGE_ENABLED=1 but CLICKUP_AGENT_TOKEN is unset — bridge cannot authenticate." >&2
+    return 0
+  fi
+
+  mkdir -p "$runtime"
+  if [ ! -r "$runtime/bridge.env" ]; then
+    ( umask 077
+      cat > "$runtime/bridge.env" <<BRIDGE_ENV
+CLICKUP_AGENT_TOKEN=${CLICKUP_AGENT_TOKEN}
+CLICKUP_WORKSPACE_ID=${BRIDGE_WORKSPACE_ID:-9015177260}
+BRIDGE_CHANNEL_ID=${BRIDGE_CHANNEL_ID:-8cnhc1c-2875}
+BRIDGE_SELF_USER_ID=${BRIDGE_SELF_USER_ID:-106678273}
+BRIDGE_ALLOWED_SENDERS=${BRIDGE_ALLOWED_SENDERS:-74542365}
+BRIDGE_REQUIRED_PREFIX="${BRIDGE_REQUIRED_PREFIX:-@claude,at claude,at-claude,hey claude}"
+BRIDGE_REPLY_STYLE=${BRIDGE_REPLY_STYLE:-voice}
+BRIDGE_POLL_SECONDS=${BRIDGE_POLL_SECONDS:-5}
+BRIDGE_ACK_AFTER_SECONDS=${BRIDGE_ACK_AFTER_SECONDS:-20}
+BRIDGE_CLAUDE_CWD=${BRIDGE_CLAUDE_CWD:-$HOME/agent}
+BRIDGE_PERMISSION_MODE=${BRIDGE_PERMISSION_MODE:-bypassPermissions}
+BRIDGE_RUNTIME_DIR=${runtime}
+BRIDGE_ENV
+    )
+    chmod 600 "$runtime/bridge.env"
+  fi
+
+  "$ctl" start >/dev/null 2>&1 ||     echo "WARN: bridge-ctl start failed; see $runtime/supervisor.out" >&2
+}
+
 # Fresh-clone agent-workspace, create a session-unique branch off main, push
 # it up so the branch persists even if this container dies mid-task. Then
 # symlink the agent-facing files (CLAUDE.md, memory, agent-skills) into
@@ -297,6 +353,7 @@ EOF
       dev)               __presentia_ensure_dev_workspace ;;
       finance|marketing) __presentia_ensure_cron_marker "${AGENT_ROLE}" ;;
     esac
+    __presentia_ensure_dm_bridge
     return 0
   fi
 
@@ -356,6 +413,9 @@ EOF
     dev)               __presentia_ensure_dev_workspace ;;
     finance|marketing) __presentia_ensure_cron_marker "${AGENT_ROLE}" ;;
   esac
+
+  # Role-agnostic, gated on BRIDGE_ENABLED so only one workspace runs it.
+  __presentia_ensure_dm_bridge
 }
 
 if [ -n "$PS1" ] && [ -z "$TMUX" ] && [ -z "$AGENT_BANNER_SHOWN" ]; then
