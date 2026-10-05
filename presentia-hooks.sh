@@ -205,14 +205,40 @@ __presentia_ensure_dev_workspace() {
       echo "WARN: presentia-ai 'staging' branch not found on origin." >&2
   fi
 
-  # Install JS deps if missing or lockfile is newer. Cheap to check, expensive
-  # to run, so we gate it.
-  if [ -f "$repo/pnpm-lock.yaml" ] && command -v pnpm >/dev/null; then
-    if [ ! -f "$repo/node_modules/.modules.yaml" ] || \
-       [ "$repo/pnpm-lock.yaml" -nt "$repo/node_modules/.modules.yaml" ]; then
-      ( cd "$repo" && pnpm install --silent ) || \
-        echo "WARN: pnpm install failed in $repo." >&2
+  # npm's cache can end up root-owned (the image bootstrap runs npm as root),
+  # which makes every subsequent `npm ci` in the container die with EACCES.
+  # Cheap to re-assert, and a no-op once correct.
+  if [ -d "$HOME/.npm" ] && [ ! -O "$HOME/.npm" ]; then
+    sudo chown -R "$(id -u):$(id -g)" "$HOME/.npm" 2>/dev/null || \
+      echo "WARN: ~/.npm is not owned by $(id -un); npm ci will fail with EACCES." >&2
+  fi
+
+  # Install JS deps if missing or the lockfile is newer. Cheap to check,
+  # expensive to run, so we gate it.
+  #
+  # presentia-ai is an **npm** project (package-lock.json). This block used to
+  # gate on pnpm-lock.yaml, which does not exist in that repo and never has —
+  # so the install silently never ran on any container. It only looked healthy
+  # because long-lived containers had someone run `npm ci` by hand. Cold
+  # containers got no node_modules at all and `tsc` exited 127.
+  if [ -f "$repo/package-lock.json" ] && command -v npm >/dev/null; then
+    if [ ! -d "$repo/node_modules" ] || \
+       [ "$repo/package-lock.json" -nt "$repo/node_modules/.package-lock.json" ]; then
+      ( cd "$repo" && npm ci --no-audit --no-fund --silent ) || \
+        echo "WARN: npm ci failed in $repo — toolchain will not be ready." >&2
     fi
+  elif [ -f "$repo/pnpm-lock.yaml" ] && command -v pnpm >/dev/null; then
+    # Retained in case the project ever migrates to pnpm.
+    ( cd "$repo" && pnpm install --silent ) || \
+      echo "WARN: pnpm install failed in $repo." >&2
+  fi
+
+  # next-env.d.ts is gitignored and Next-generated, so on a never-built tree
+  # `tsc --noEmit` fails with "Cannot find module '@/app/icon.png'" — a
+  # confusing error that looks like broken source rather than a missing
+  # generated file. Best effort; non-fatal.
+  if [ -d "$repo/node_modules" ] && [ ! -f "$repo/next-env.d.ts" ]; then
+    ( cd "$repo" && npm run typegen --silent ) >/dev/null 2>&1 || true
   fi
 
   # Warm Playwright chromium so first browser-driven test isn't slow. Best
@@ -248,7 +274,16 @@ __presentia_ensure_dev_workspace() {
 # Idempotent: an existing bridge.env is left alone, and bridge-ctl start is a
 # no-op when the bridge is already running.
 __presentia_ensure_dm_bridge() {
-  [ "${BRIDGE_ENABLED:-0}" = "1" ] || return 0
+  if [ "${BRIDGE_ENABLED:-0}" != "1" ]; then
+    # Silent no-op is the right default for roles that shouldn't run a bridge.
+    # But on a cold dev container "disabled" is indistinguishable from "hook
+    # missing", which cost a multi-step investigation on 2026-10-05. Say so
+    # once, on the role where a bridge is actually expected.
+    if [ "${AGENT_ROLE:-}" = "dev" ]; then
+      echo "INFO: DM bridge not started — BRIDGE_ENABLED is unset. Set it to 1 in the workspace run_config (env is read at container creation), or start it manually with ~/agent/tooling/bridge/bridge-ctl start." >&2
+    fi
+    return 0
+  fi
 
   local tooling="$HOME/agent/tooling"
   local ctl="$tooling/bridge/bridge-ctl"
