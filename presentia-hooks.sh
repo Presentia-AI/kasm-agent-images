@@ -184,16 +184,31 @@ __presentia_ensure_dev_workspace() {
 
   if [ ! -d "$repo/.git" ]; then
     rm -rf "$repo"
-    local token
-    token="$(cat "$token_file")"
+    # Clone over plain HTTPS. Do NOT embed the token in the URL: installation
+    # tokens expire in ~1 hour, and an embedded one is written into
+    # .git/config permanently. The token FILE is re-minted by host cron every
+    # 50 min, but nothing rewrites the remote — so the file stays valid while
+    # the remote goes stale, and pushes start failing with "Invalid username
+    # or token" roughly an hour after boot. That is what stranded 113 commits
+    # on a dev instance in Oct 2026. The URL-scoped credential helper in
+    # /etc/gitconfig reads the token per invocation and never goes stale,
+    # which is why ~/agent/tooling has never had this problem.
     if ! git clone --quiet \
-        "https://x-access-token:${token}@github.com/Presentia-AI/presentia-ai.git" \
+        "https://github.com/Presentia-AI/presentia-ai.git" \
         "$repo" 2>/dev/null; then
       echo "WARN: clone of presentia-ai failed. Confirm the presentia-agent-tooling App is installed on the repo with Contents:write + Pull requests:write." >&2
       return 1
     fi
     git -C "$repo" config user.email "claude-agent@presentia.ai"
     git -C "$repo" config user.name  "Claude AI Agent"
+  fi
+
+  # Self-heal a clone made by an older image (or by hand) that still carries an
+  # embedded token. Rewriting to the bare URL hands auth back to the credential
+  # helper. Idempotent and safe on an already-clean remote.
+  if git -C "$repo" remote get-url origin 2>/dev/null | grep -q 'x-access-token:'; then
+    git -C "$repo" remote set-url origin "https://github.com/Presentia-AI/presentia-ai.git" && \
+      echo "INFO: rewrote presentia-ai remote to drop an embedded (expiring) token." >&2
   fi
 
   # Stay on staging — dev-agent always branches off origin/staging per
@@ -241,10 +256,27 @@ __presentia_ensure_dev_workspace() {
     ( cd "$repo" && npm run typegen --silent ) >/dev/null 2>&1 || true
   fi
 
-  # Warm Playwright chromium so first browser-driven test isn't slow. Best
-  # effort; non-fatal if it errors.
-  if command -v npx >/dev/null; then
-    ( cd "$repo" && npx --no-install playwright install chromium --with-deps >/dev/null 2>&1 ) || true
+  # Install the Playwright browser binaries. NOT merely a warm-up: without
+  # them `test:e2e` and `test:qa` both fail outright. Verified 2026-10-06 that
+  # ~/.cache/ms-playwright did not exist on any container — this step has
+  # silently never completed, because the old form swallowed every error into
+  # `|| true` and never said why.
+  #
+  # Two reasons the old form could not work:
+  #   - it ran before node_modules existed on a cold container, so the local
+  #     playwright CLI was absent and `--no-install` forbade fetching one;
+  #   - `--with-deps` shells out to apt as root and fails without sudo.
+  # Now: run the repo's own pinned CLI, keep --with-deps under sudo, and
+  # report failure instead of hiding it.
+  if [ -x "$repo/node_modules/.bin/playwright" ]; then
+    if [ ! -d "$HOME/.cache/ms-playwright" ]; then
+      ( cd "$repo" && sudo -n true 2>/dev/null \
+          && ./node_modules/.bin/playwright install --with-deps chromium \
+          || ./node_modules/.bin/playwright install chromium ) >/dev/null 2>&1 \
+        || echo "WARN: playwright install failed — test:e2e / test:qa will not run. Retry with: cd $repo && npx playwright install chromium" >&2
+    fi
+  else
+    echo "WARN: $repo/node_modules/.bin/playwright missing — skipped browser install (npm ci likely failed)." >&2
   fi
 
   # First-boot marker for the dev-agent. The role CLAUDE.md instructs the
