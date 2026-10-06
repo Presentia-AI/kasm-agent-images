@@ -274,16 +274,26 @@ __presentia_ensure_dev_workspace() {
 # Idempotent: an existing bridge.env is left alone, and bridge-ctl start is a
 # no-op when the bridge is already running.
 __presentia_ensure_dm_bridge() {
-  if [ "${BRIDGE_ENABLED:-0}" != "1" ]; then
-    # Silent no-op is the right default for roles that shouldn't run a bridge.
-    # But on a cold dev container "disabled" is indistinguishable from "hook
-    # missing", which cost a multi-step investigation on 2026-10-05. Say so
-    # once, on the role where a bridge is actually expected.
-    if [ "${AGENT_ROLE:-}" = "dev" ]; then
-      echo "INFO: DM bridge not started — BRIDGE_ENABLED is unset. Set it to 1 in the workspace run_config (env is read at container creation), or start it manually with ~/agent/tooling/bridge/bridge-ctl start." >&2
-    fi
-    return 0
-  fi
+  # Accept any ordinary spelling of "on". Kasm run_config values are strings
+  # (Docker env), so the canonical setting is "1" — but "true"/"yes"/"on" are
+  # what a human reaches for, and a strict == "1" check fails them SILENTLY.
+  # Case-insensitive so "True" works too.
+  case "$(printf '%s' "${BRIDGE_ENABLED:-0}" | tr '[:upper:]' '[:lower:]')" in
+    1|true|yes|on|enabled)
+      : # enabled — fall through and start the bridge
+      ;;
+    *)
+      # Silent no-op is the right default for roles that shouldn't run a bridge.
+      # But on a cold dev container "disabled" is indistinguishable from "hook
+      # missing", which cost a multi-step investigation on 2026-10-05. Say so
+      # once, on the role where a bridge is actually expected — and echo the
+      # value back, so a typo or a JSON boolean is visible rather than silent.
+      if [ "${AGENT_ROLE:-}" = "dev" ]; then
+        echo "INFO: DM bridge not started — BRIDGE_ENABLED=\"${BRIDGE_ENABLED:-<unset>}\" (accepted: 1, true, yes, on). Set it as a JSON *string* in the workspace run_config, e.g. {\"BRIDGE_ENABLED\": \"1\"} — env is read at container creation. Or start it now with ~/agent/tooling/bridge/bridge-ctl start." >&2
+      fi
+      return 0
+      ;;
+  esac
 
   local tooling="$HOME/agent/tooling"
   local ctl="$tooling/bridge/bridge-ctl"

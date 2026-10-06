@@ -60,7 +60,7 @@ A role whose CLAUDE.md is missing from the clone, or an unrecognised `AGENT_ROLE
 account — drive the agent over a direct message. Implementation and safety model
 live in `bridge/README.md` in `agent-workspace`.
 
-**Opt-in only, via `BRIDGE_ENABLED=1` in the workspace run_config.** This matters:
+**Opt-in only, via `BRIDGE_ENABLED` in the workspace run_config.** Set it as a JSON **string**, not a boolean — Kasm run_config values become Docker env vars, which are always strings. `"1"` is canonical; `"true"`, `"yes"`, `"on"` and `"enabled"` are also accepted, case-insensitive. Anything else leaves the bridge off, and on `AGENT_ROLE=dev` the hook echoes the value it saw so a typo or a JSON boolean is visible rather than silent. This matters:
 the bridge watches a single DM channel, so if several role workspaces each started
 one they would all poll the same channel and all reply to the same message.
 **Exactly one workspace should set it.**
