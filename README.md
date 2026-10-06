@@ -19,7 +19,7 @@ Built from `kasmweb/ubuntu-jammy-desktop:1.17.0`. Adds:
 - `/usr/local/bin/presentia-gh-token` — git credential helper that reads the bind-mounted GitHub App installation token. Wired into `/etc/gitconfig` scoped to `https://github.com/Presentia-AI/agent-workspace`.
 - `/etc/presentia-hooks.sh` (sourced from `/etc/bash.bashrc`) — on first interactive shell:
   - `__presentia_setup_gh_auth`: exports `GH_TOKEN` from `/etc/presentia/github-token` so `gh` is auto-authenticated as the App.
-  - `__presentia_ensure_session`: fresh-clones `Presentia-AI/agent-workspace` into `~/agent/tooling`, creates a session-unique branch `agent/session-<UTC-ts>-<rand>` off `main`, pushes it up, then symlinks `~/agent/CLAUDE.md → tooling/<role>/CLAUDE.md` (role resolved from `$AGENT_ROLE`, see below) and shared `memory/`/`agent-skills/` into Claude Code's data dirs. When `AGENT_ROLE=dev` it also runs `__presentia_ensure_dev_workspace` (clone of `presentia-ai` under `~/work/`, dep install, Playwright warm-up, cron-registration marker). If the token isn't mounted, writes `~/agent/GITHUB_APP_TOKEN_MISSING.md` and stops.
+  - `__presentia_ensure_session`: fresh-clones `Presentia-AI/agent-workspace` into `~/agent/tooling`, creates a session-unique branch `agent/session-<UTC-ts>-<rand>` off `main`, pushes it up, then symlinks `~/agent/CLAUDE.md → tooling/<role>/CLAUDE.md` (role resolved from `$AGENT_ROLE`, see below) and shared `memory/`/`agent-skills/` into Claude Code's data dirs. When `AGENT_ROLE=dev` it also runs `__presentia_ensure_dev_workspace` (clone of `presentia-ai` under `~/work/`, `npm ci` — the repo is npm, not pnpm — `~/.npm` ownership repair, `next-env.d.ts` typegen, Playwright warm-up, cron-registration marker). If the token isn't mounted, writes `~/agent/GITHUB_APP_TOKEN_MISSING.md` and stops.
   - `__presentia_ensure_chrome_devtools_mcp`: registers `chrome-devtools` MCP in `~/.claude.json` if missing.
   - `__presentia_ensure_notification_hook`: registers `agent-ping` as the Notification hook in `~/.claude/settings.json`.
   - Auto-attaches tmux session `main`.
@@ -60,7 +60,7 @@ A role whose CLAUDE.md is missing from the clone, or an unrecognised `AGENT_ROLE
 account — drive the agent over a direct message. Implementation and safety model
 live in `bridge/README.md` in `agent-workspace`.
 
-**Opt-in only, via `BRIDGE_ENABLED=1` in the workspace run_config.** This matters:
+**Opt-in only, via `BRIDGE_ENABLED` in the workspace run_config.** Set it as a JSON **string**, not a boolean — Kasm run_config values become Docker env vars, which are always strings. `"1"` is canonical; `"true"`, `"yes"`, `"on"` and `"enabled"` are also accepted, case-insensitive. Anything else leaves the bridge off, and on `AGENT_ROLE=dev` the hook echoes the value it saw so a typo or a JSON boolean is visible rather than silent. This matters:
 the bridge watches a single DM channel, so if several role workspaces each started
 one they would all poll the same channel and all reply to the same message.
 **Exactly one workspace should set it.**
